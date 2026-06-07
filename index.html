@@ -2,27 +2,22 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Advanced OCR Grammar Auditor</title>
+    <title>Advanced PDF Grammar Auditor</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <style>
         :root { --primary: #6366f1; --bg: #f1f5f9; --card: #ffffff; --text: #1e293b; --error: #ef4444; --success: #10b981; }
-        body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 40px 20px; }
-        .container { max-width: 850px; margin: auto; }
-        .upload-card { background: var(--card); padding: 40px; border-radius: 20px; text-align: center; border: 2px dashed #cbd5e1; cursor: pointer; transition: 0.3s; }
-        .page-card { background: var(--card); padding: 25px; border-radius: 16px; margin-top: 25px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-left: 6px solid var(--primary); }
-        .issue { margin-top: 15px; padding: 12px; background: #fef2f2; border-left: 4px solid var(--error); border-radius: 4px; }
-        .orig { color: var(--error); text-decoration: line-through; }
-        .corr { color: var(--success); font-weight: 700; }
-        #status { text-align: center; margin: 20px 0; font-weight: 600; color: var(--primary); }
+        body { font-family: sans-serif; background: var(--bg); padding: 40px 20px; }
+        .container { max-width: 800px; margin: auto; }
+        .page-card { background: var(--card); padding: 20px; margin-top: 20px; border-radius: 12px; border-left: 5px solid var(--primary); }
+        .issue { margin: 10px 0; padding: 10px; background: #fff1f1; border-left: 4px solid var(--error); }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h1>Grammar Auditor Pro</h1>
-    <label for="upload" class="upload-card">Click to upload PDF (Text or Scanned)</label>
-    <input type="file" id="upload" accept="application/pdf" style="display:none">
+    <h1>Grammar Auditor</h1>
+    <input type="file" id="upload" accept="application/pdf">
     <div id="status"></div>
     <div id="result"></div>
 </div>
@@ -32,12 +27,7 @@
 
     document.getElementById('upload').addEventListener('change', async (e) => {
         const file = e.target.files[0];
-        if (!file) return;
-        
         const status = document.getElementById('status');
-        const resultDiv = document.getElementById('result');
-        resultDiv.innerHTML = "";
-        
         const arrayBuffer = await file.arrayBuffer();
         const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
@@ -46,55 +36,57 @@
             const page = await pdf.getPage(i);
             const content = await page.getTextContent();
             
-            let text = content.items.map(item => item.str).join(" ");
-            
-            // If text is empty, perform OCR
-            if (text.trim().length < 50) {
-                status.innerText = `Scanning page ${i} (OCR)...`;
+            // IMPROVED EXTRACTION: Grouping by Y-coordinates to maintain sentence flow
+            let lines = {};
+            content.items.forEach(item => {
+                let y = Math.round(item.transform[5] / 10); // Round Y to group lines
+                if (!lines[y]) lines[y] = [];
+                lines[y].push({ x: item.transform[4], str: item.str });
+            });
+
+            let text = Object.keys(lines).sort((a, b) => b - a)
+                .map(y => lines[y].sort((a, b) => a.x - b.x).map(i => i.str).join(" "))
+                .join("\n");
+
+            // OCR Fallback
+            if (text.trim().length < 20) {
                 const viewport = page.getViewport({ scale: 2.0 });
                 const canvas = document.createElement('canvas');
-                const context = canvas.getContext('2d');
-                canvas.height = viewport.height;
-                canvas.width = viewport.width;
-                await page.render({ canvasContext: context, viewport }).promise;
-                
+                canvas.height = viewport.height; canvas.width = viewport.width;
+                await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
                 const { data: { text: ocrText } } = await Tesseract.recognize(canvas, 'eng');
                 text = ocrText;
             }
 
+            console.log("Extracted Text for Page " + i + ":", text); // DEBUG: Check console
             const matches = await checkGrammar(text);
             renderPage(i, matches);
         }
-        status.innerText = "✅ Analysis Complete.";
     });
 
     async function checkGrammar(text) {
-        if (text.length < 50) return [];
         try {
+            // Using the correct URL parameters for the public LanguageTool API
             const response = await fetch('https://api.languagetool.org/v2/check', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({ text: text.substring(0, 2000), language: 'en-US' })
+                body: new URLSearchParams({ text: text, language: 'en-US', enabledOnly: 'false' })
             });
-            return (await response.json()).matches || [];
-        } catch { return []; }
+            const data = await response.json();
+            return data.matches || [];
+        } catch (e) { return []; }
     }
 
     function renderPage(pageNum, matches) {
         const div = document.createElement('div');
         div.className = 'page-card';
-        div.innerHTML = `<h3>Page ${pageNum}</h3>`;
-        if (matches.length > 0) {
-            matches.slice(0, 5).forEach(m => {
-                div.innerHTML += `<div class="issue">
-                    <strong>Issue:</strong> ${m.message}<br>
-                    <span class="orig">${m.context.text.substring(m.offset, m.offset + m.length)}</span> 
-                    → <span class="corr">${m.replacements.slice(0, 1).map(r => r.value).join(', ')}</span>
-                </div>`;
-            });
-        } else {
-            div.innerHTML += `<p style="color:var(--success)">✓ No errors detected.</p>`;
-        }
+        div.innerHTML = `<h3>Page ${pageNum} (${matches.length} issues)</h3>`;
+        matches.forEach(m => {
+            div.innerHTML += `<div class="issue">
+                <strong>${m.shortMessage || 'Error'}:</strong> ${m.message}<br>
+                <small>Fix: ${m.replacements.slice(0, 3).map(r => r.value).join(', ')}</small>
+            </div>`;
+        });
         document.getElementById('result').appendChild(div);
     }
 </script>
